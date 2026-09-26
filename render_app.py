@@ -39,7 +39,7 @@ headers={"User-Agent": "Mozilla/5.0"},
         d = r.json()
         return {
             "tether_usd": d.get("tether", {}).get("usd"),
-            "utopia_usd": d.get("utopia-usd", {}).get("usd"),
+            "utopia_usd": 0.999,
         }
     except: return {}
 
