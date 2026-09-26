@@ -24,7 +24,8 @@ OUTPUT   = "Ali1377.01.05.json"
 INTERVAL_FAST = 15 * 60
 INTERVAL_SLOW = 40 * 60
 
-UUSD_FALLBACK = 0.999
+TETHER_FALLBACK = 1.0
+UUSD_FALLBACK   = 0.999
 
 # ═══════════════════════════════════════════════
 #  APP + LOCKS
@@ -64,91 +65,133 @@ def fluctuate(price):
 
 
 # ═══════════════════════════════════════════════
-#  CRYPTO FETCHERS
+#  TETHER (3 fallback sources)
 # ═══════════════════════════════════════════════
-def _fetch_tether():
-    """تتر از CoinGecko با ۳ بار retry"""
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    for attempt in range(3):
-        try:
-            r = requests.get(
-                url,
-                params={"ids": "tether", "vs_currencies": "usd"},
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                v = r.json().get("tether", {}).get("usd")
-                if v is not None:
-                    return float(v)
-            log("[!] CoinGecko HTTP " + str(r.status_code) +
-                " try " + str(attempt + 1))
-        except Exception as e:
-            log("[!] CoinGecko try " + str(attempt + 1) + ": " + str(e))
-        time.sleep(2)
+def _tether_coingecko():
+    try:
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "tether", "vs_currencies": "usd"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            v = r.json().get("tether", {}).get("usd")
+            if v is not None:
+                return round(float(v), 4)
+    except Exception as e:
+        log("[!] CoinGecko tether: " + str(e))
     return None
 
 
-def _fetch_utopia():
-    """یوتوپیا (UUSD) از CoinPaprika با ۳ بار retry"""
-    url = "https://api.coinpaprika.com/v1/tickers/uusd-utopia-usd"
-    for attempt in range(3):
-        try:
-            r = requests.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10
-            )
-            if r.status_code == 200:
-                data = r.json()
-                v = (data.get("quotes", {})
-                         .get("USD", {})
-                         .get("price"))
-                if v is not None:
-                    return float(v)
-            log("[!] CoinPaprika HTTP " + str(r.status_code) +
-                " try " + str(attempt + 1))
-        except Exception as e:
-            log("[!] CoinPaprika try " + str(attempt + 1) + ": " + str(e))
-        time.sleep(2)
+def _tether_binance():
+    try:
+        r = requests.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": "USDCUSDT"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            v = r.json().get("price")
+            if v is not None:
+                val = 1.0 / float(v)
+                if 0.9 < val < 1.1:
+                    return round(val, 4)
+    except Exception as e:
+        log("[!] Binance tether: " + str(e))
     return None
 
 
+def _tether_kraken():
+    try:
+        r = requests.get(
+            "https://api.kraken.com/0/public/Ticker",
+            params={"pair": "USDTZUSD"},
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            data = r.json().get("result", {})
+            for key in data:
+                last = data[key].get("c", [None])[0]
+                if last is not None:
+                    val = float(last)
+                    if 0.9 < val < 1.1:
+                        return round(val, 4)
+    except Exception as e:
+        log("[!] Kraken tether: " + str(e))
+    return None
+
+
+def fetch_tether():
+    for fn in (_tether_coingecko, _tether_binance, _tether_kraken):
+        v = fn()
+        if v is not None:
+            log("[OK] tether = " + str(v) + " (" + fn.__name__ + ")")
+            return v
+    log("[!] tether fallback → " + str(TETHER_FALLBACK))
+    return TETHER_FALLBACK
+
+
+# ═══════════════════════════════════════════════
+#  UTOPIA (UUSD)
+# ═══════════════════════════════════════════════
+def _utopia_coinpaprika():
+    try:
+        r = requests.get(
+            "https://api.coinpaprika.com/v1/tickers/uusd-utopia-usd",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=8
+        )
+        if r.status_code == 200:
+            v = (r.json()
+                    .get("quotes", {})
+                    .get("USD", {})
+                    .get("price"))
+            if v is not None:
+                return round(float(v), 4)
+    except Exception as e:
+        log("[!] CoinPaprika utopia: " + str(e))
+    return None
+
+
+def fetch_utopia():
+    v = _utopia_coinpaprika()
+    if v is not None:
+        log("[OK] utopia = " + str(v))
+        return v
+    log("[!] utopia fallback → " + str(UUSD_FALLBACK))
+    return UUSD_FALLBACK
+
+
+# ═══════════════════════════════════════════════
+#  COMBINED CRYPTO
+# ═══════════════════════════════════════════════
 def fetch_crypto():
-    """دریافت تتر و یوتوپیا"""
-    result = {}
-    t = _fetch_tether()
-    if t is not None:
-        result["tether_usd"] = t
-    u = _fetch_utopia()
-    result["utopia_usd"] = u if u is not None else UUSD_FALLBACK
-    return result
+    return {
+        "tether_usd": fetch_tether(),
+        "utopia_usd": fetch_utopia(),
+    }
 
 
 # ═══════════════════════════════════════════════
 #  JSON R/W (atomic)
 # ═══════════════════════════════════════════════
 def update_json(updater_fn):
-    """
-    Read → update → write اتمیک تحت یک قفل واحد.
-    updater_fn(ali) باید مقدار ali رو تغییر بده.
-    """
     with file_lock:
-        # read
         try:
             with open(OUTPUT, "r", encoding="utf-8") as f:
                 old = json.load(f).get("ali1377", {})
         except (FileNotFoundError, json.JSONDecodeError):
             old = {}
 
-        # modify
         try:
             updater_fn(old)
         except Exception as e:
             log("[!] updater_fn: " + str(e))
             return
 
-        # write
         data = {
             "ali1377": old,
             "last_updated": datetime.now(timezone.utc).isoformat()
@@ -177,7 +220,6 @@ async def ensure_connected(client):
 
 
 async def fetch_lui(client):
-    """PS Voucher از کانال Luibit"""
     try:
         if not await ensure_connected(client):
             return {}
@@ -202,7 +244,6 @@ async def fetch_lui(client):
 
 
 async def fetch_vh(client):
-    """U + Premium Voucher از VoucherHub"""
     try:
         if not await ensure_connected(client):
             return {}
@@ -267,7 +308,6 @@ def apply_vh(ali, vh):
 #  LOOPS
 # ═══════════════════════════════════════════════
 async def fast_loop(client):
-    """هر ۱۵ دقیقه: PS Voucher + Crypto"""
     while True:
         start = time.monotonic()
         log("FAST start")
@@ -290,7 +330,6 @@ async def fast_loop(client):
 
 
 async def slow_loop(client):
-    """هر ۴۰ دقیقه: U + Premium Voucher"""
     await asyncio.sleep(20)
     while True:
         start = time.monotonic()
@@ -342,7 +381,8 @@ def prices():
                 content = f.read()
         return content, 200, {"Content-Type": "application/json; charset=utf-8"}
     except Exception:
-        return '{"status":"starting"}', 200, {"Content-Type": "application/json; charset=utf-8"}
+        return ('{"status":"starting"}', 200,
+                {"Content-Type": "application/json; charset=utf-8"})
 
 
 @app.route("/health")
