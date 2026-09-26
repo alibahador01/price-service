@@ -33,7 +33,8 @@ def get_crypto():
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
-            params={"ids": "tether,utopia-usd", "vs_currencies": "usd"},
+            params={"ids": "tether", "vs_currencies": "usd"},
+headers={"User-Agent": "Mozilla/5.0"},
             timeout=10)
         d = r.json()
         return {
