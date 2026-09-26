@@ -177,8 +177,7 @@ async def loops_main():
 
 
 @app.route("/")
-@app.route("/health")
-def health():
+def prices():
     try:
         with file_lock:
             with open(OUTPUT, "r", encoding="utf-8") as f:
@@ -186,6 +185,10 @@ def health():
         return content, 200, {"Content-Type": "application/json; charset=utf-8"}
     except Exception:
         return '{"status":"starting"}', 200
+
+@app.route("/health")
+def health():
+    return "OK", 200, {"Content-Type": "text/plain"}
 
 
 if __name__ == "__main__":
