@@ -18,14 +18,24 @@ API_ID   = 2040
 API_HASH = "b18441a1ff607e10a989891a5462e627"
 SESSION  = "session3"
 BOT_VH   = "@VoucherHub_bot"
-CH_LUI   = "@Luibitcom"
+BOT_HOT  = "@hot_voucher_bot"
 OUTPUT   = "Ali1377.01.05.json"
 
-INTERVAL_FAST = 15 * 60
-INTERVAL_SLOW = 20 * 60
+# بازه تصادفی هر دارایی (ثانیه)
+ASSETS_CONFIG = {
+    "ps":      {"min": 25 * 60, "max": 35 * 60},   # PS: 25-35 دقیقه
+    "u_prem":  {"min": 30 * 60, "max": 50 * 60},   # U + Premium: 30-50 دقیقه
+    "crypto":  {"min": 12 * 60, "max": 18 * 60},   # Tether + Utopia: 12-18 دقیقه
+}
+
+MIN_GAP = 15 * 60   # حداقل فاصله بین دو fetch تلگرام
+MAX_SLEEP = 60      # حداکثر زمان بین هر چک scheduler
 
 TETHER_FALLBACK = 1.0
 UUSD_FALLBACK   = 0.999
+
+TELEGRAM_ASSETS = ["ps", "u_prem"]
+API_ASSETS      = ["crypto"]
 
 # ═══════════════════════════════════════════════
 #  APP + LOCKS
@@ -58,6 +68,7 @@ def fa_to_en(s):
 
 
 def fluctuate(price):
+    """۳ رقم اول ثابت از منبع، ۳ رقم آخر نوسان 0-999"""
     if price is None:
         return None
     first_part = (price // 1000) * 1000
@@ -128,9 +139,9 @@ def fetch_tether():
     for fn in (_tether_coingecko, _tether_binance, _tether_kraken):
         v = fn()
         if v is not None:
-            log("[OK] tether = " + str(v) + " (" + fn.__name__ + ")")
+            log("[OK] tether = " + str(v))
             return v
-    log("[!] tether fallback → " + str(TETHER_FALLBACK))
+    log("[!] tether fallback")
     return TETHER_FALLBACK
 
 
@@ -161,13 +172,10 @@ def fetch_utopia():
     if v is not None:
         log("[OK] utopia = " + str(v))
         return v
-    log("[!] utopia fallback → " + str(UUSD_FALLBACK))
+    log("[!] utopia fallback")
     return UUSD_FALLBACK
 
 
-# ═══════════════════════════════════════════════
-#  COMBINED CRYPTO
-# ═══════════════════════════════════════════════
 def fetch_crypto():
     return {
         "tether_usd": fetch_tether(),
@@ -219,37 +227,97 @@ async def ensure_connected(client):
         return False
 
 
-async def fetch_lui(client):
+async def _click_first_match(client, bot, patterns):
+    """روی اولین دکمه‌ای که با یکی از pattern ها مچ شد، کلیک کن"""
+    msgs = await client.get_messages(bot, limit=1)
+    if not msgs or not msgs[0].buttons:
+        return False
+    for pattern in patterns:
+        for row in msgs[0].buttons:
+            for b in row:
+                if pattern in b.text:
+                    log("[*] Click: " + b.text)
+                    await b.click()
+                    await asyncio.sleep(random.uniform(3, 5))
+                    return True
+    return False
+
+
+async def fetch_ps(client):
+    """PS Voucher خرید و فروش از @hot_voucher_bot"""
     try:
         if not await ensure_connected(client):
             return {}
-        ch = await client.get_entity(CH_LUI)
-        msgs = await client.get_messages(ch, limit=5)
-        for m in msgs:
-            if not m.text or "PS Voucher" not in m.text:
-                continue
-            t = m.text
-            buy_m  = re.search(r"PS\s*Voucher\s*Buy[:\s]*`?([\d,]+)", t)
-            sell_m = re.search(r"PS\s*Voucher\s*Sell[:\s]*`?([\d,]+)", t)
-            if buy_m and sell_m:
-                return {
-                    "ps_buy":  fa_to_en(buy_m.group(1)),
-                    "ps_sell": fa_to_en(sell_m.group(1))
-                }
-        log("[!] No PS Voucher in Luibit")
-        return {}
+        bot = await client.get_entity(BOT_HOT)
+        result = {}
+
+        # ═══ خرید PS (تبدیل یووچر به پی اس) ═══
+        await client.send_message(bot, "/start")
+        await asyncio.sleep(random.uniform(3, 5))
+
+        buy_paths = [
+            ["تبدیل ووچر ها", "یووچر به پی اس ووچر"],
+            ["خرید از موجودی", "پی اس ووچر"],
+        ]
+        path = random.choice(buy_paths)
+
+        for step in path:
+            ok = await _click_first_match(client, bot, [step])
+            if not ok:
+                break
+
+        msgs = await client.get_messages(bot, limit=1)
+        text = (msgs[0].text if msgs else "") or ""
+        log("[PS BUY] " + text[:150])
+
+        m = re.search(
+            r"(?:نرخ\s*خرید\s*دلار\s*پی\s*اس\s*ووچر|قیمت\s*واحد)[:\s]*\*{0,2}([\d,\u060c\u06f0-\u06f9]+)",
+            text
+        )
+        if m:
+            result["ps_buy"] = fa_to_en(m.group(1))
+
+        # ═══ فروش PS (افزایش موجودی → پی اس) ═══
+        await asyncio.sleep(random.uniform(2, 4))
+        await client.send_message(bot, "/start")
+        await asyncio.sleep(random.uniform(3, 5))
+
+        sell_paths = [
+            ["افزایش موجودی", "پی اس ووچر"],
+            ["تبدیل ووچر ها", "پی اس ووچر به یو"],
+        ]
+        path = random.choice(sell_paths)
+
+        for step in path:
+            ok = await _click_first_match(client, bot, [step])
+            if not ok:
+                break
+
+        msgs = await client.get_messages(bot, limit=1)
+        text = (msgs[0].text if msgs else "") or ""
+        log("[PS SELL] " + text[:150])
+
+        m = re.search(
+            r"نرخ\s*دلار\s*پی\s*اس\s*ووچر[:\s]*\*{0,2}([\d,\u060c\u06f0-\u06f9]+)",
+            text
+        )
+        if m:
+            result["ps_sell"] = fa_to_en(m.group(1))
+
+        return result
     except Exception as e:
-        log("[!] Lui: " + str(e))
+        log("[!] PS: " + str(e))
         return {}
 
 
 async def fetch_vh(client):
+    """U Voucher + Premium از @VoucherHub_bot"""
     try:
         if not await ensure_connected(client):
             return {}
         bot = await client.get_entity(BOT_VH)
         await client.send_message(bot, "/prices")
-        await asyncio.sleep(5)
+        await asyncio.sleep(random.uniform(4, 6))
         msgs = await client.get_messages(bot, limit=5)
         text = ""
         for m in msgs:
@@ -257,7 +325,7 @@ async def fetch_vh(client):
                 text = m.text
                 break
         if not text:
-            log("[!] VoucherHub: no price message")
+            log("[!] VH: no price message")
             return {}
 
         def ext(pat):
@@ -305,48 +373,69 @@ def apply_vh(ali, vh):
 
 
 # ═══════════════════════════════════════════════
-#  LOOPS
+#  SCHEDULER (مرکزی، کم‌مصرف)
 # ═══════════════════════════════════════════════
-async def fast_loop(client):
+async def scheduler_loop(client):
+    log("[SCHED] Starting scheduler...")
+
+    now = time.time()
+    next_fetch = {k: now + random.uniform(10, 30) for k in ASSETS_CONFIG}
+    last_tg = 0
+
     while True:
-        start = time.monotonic()
-        log("FAST start")
-        try:
-            ps     = await fetch_lui(client)
-            crypto = await asyncio.to_thread(fetch_crypto)
+        now = time.time()
+        due = [k for k in ASSETS_CONFIG if now >= next_fetch[k]]
 
-            def updater(ali):
-                apply_ps(ali, ps)
-                apply_crypto(ali, crypto)
+        if due:
+            api_due = sorted([k for k in due if k in API_ASSETS],
+                             key=lambda k: next_fetch[k])
+            tg_due = sorted([k for k in due if k in TELEGRAM_ASSETS],
+                            key=lambda k: next_fetch[k])
 
-            update_json(updater)
-        except Exception as e:
-            log("[!] FAST loop: " + str(e))
+            # ─── اول API (بدون محدودیت تلگرام) ───
+            if api_due:
+                asset = api_due[0]
+                log("[SCHED] " + asset)
+                try:
+                    crypto = await asyncio.to_thread(fetch_crypto)
+                    update_json(lambda a: apply_crypto(a, crypto))
+                except Exception as e:
+                    log("[!] crypto: " + str(e))
+                cfg = ASSETS_CONFIG[asset]
+                next_fetch[asset] = time.time() + random.uniform(
+                    cfg["min"], cfg["max"])
+                continue
 
-        elapsed = time.monotonic() - start
-        wait = max(5, INTERVAL_FAST - elapsed)
-        log("FAST next in " + str(int(wait)) + "s")
-        await asyncio.sleep(wait)
+            # ─── بعد تلگرام (با MIN_GAP) ───
+            if tg_due:
+                asset = tg_due[0]
+                gap = now - last_tg
+                if gap < MIN_GAP:
+                    wait = MIN_GAP - gap
+                    log("[SCHED] min gap wait " + str(int(wait)) + "s")
+                    await asyncio.sleep(wait)
+                    continue
 
+                log("[SCHED] " + asset)
+                try:
+                    if asset == "ps":
+                        ps = await fetch_ps(client)
+                        update_json(lambda a: apply_ps(a, ps))
+                    elif asset == "u_prem":
+                        vh = await fetch_vh(client)
+                        update_json(lambda a: apply_vh(a, vh))
+                except Exception as e:
+                    log("[!] " + asset + ": " + str(e))
+                last_tg = time.time()
+                cfg = ASSETS_CONFIG[asset]
+                next_fetch[asset] = time.time() + random.uniform(
+                    cfg["min"], cfg["max"])
+                continue
 
-async def slow_loop(client):
-    await asyncio.sleep(20)
-    while True:
-        start = time.monotonic()
-        log("SLOW start")
-        try:
-            vh = await fetch_vh(client)
-
-            def updater(ali):
-                apply_vh(ali, vh)
-
-            update_json(updater)
-        except Exception as e:
-            log("[!] SLOW loop: " + str(e))
-
-        elapsed = time.monotonic() - start
-        wait = max(5, INTERVAL_SLOW - elapsed)
-        log("SLOW next in " + str(int(wait)) + "s")
+        # ─── Sleep هوشمند ───
+        next_time = min(next_fetch.values())
+        wait = max(5, next_time - time.time())
+        wait = min(wait, MAX_SLEEP)
         await asyncio.sleep(wait)
 
 
@@ -356,9 +445,9 @@ async def loops_main():
     if not await client.is_user_authorized():
         log("[!] Session not authorized!")
         return
-    log("[OK] Telegram connected. Starting loops.")
+    log("[OK] Telegram connected.")
     try:
-        await asyncio.gather(fast_loop(client), slow_loop(client))
+        await scheduler_loop(client)
     except Exception as e:
         log("[!] loops_main: " + str(e))
 
