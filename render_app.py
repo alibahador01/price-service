@@ -1404,7 +1404,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_async_loops, name="async-core", daemon=True).start()
 
     # برای Render باید یک Web Service واقعی باشد و روی 0.0.0.0 گوش دهد.
-    app.run(
+    app.run( 
         host="0.0.0.0",
         port=PORT,
         debug=False,
