@@ -30,7 +30,7 @@ except Exception:
 API_ID = int(os.environ.get("TG_API_ID", "2040"))
 API_HASH = os.environ.get("TG_API_HASH", "").strip()
 SESSION = os.environ.get("TG_SESSION", "session3").strip()
-TG_SESSION_STRING = os.environ.get("TG_SESSION_STRING", "").strip()
+TG_SESSION_STRING = "".join(os.environ.get("TG_SESSION_STRING", "").split())
 
 BOT_VH = os.environ.get("BOT_VH", "@VoucherHub_bot").strip()
 OUTPUT = os.environ.get("OUTPUT_FILE", "Ali1377.01.05.json").strip()
