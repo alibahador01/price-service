@@ -8,9 +8,11 @@ import threading
 import tempfile
 import signal
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Callable, Dict, Optional, List, Tuple
 
 import requests
+import jdatetime
 from flask import Flask, Response
 from telethon import TelegramClient
 try:
@@ -30,10 +32,25 @@ except Exception:
 API_ID = int(os.environ.get("TG_API_ID", "2040"))
 API_HASH = os.environ.get("TG_API_HASH", "").strip()
 SESSION = os.environ.get("TG_SESSION", "session3").strip()
-TG_SESSION_STRING = "".join(os.environ.get("TG_SESSION_STRING", "").split())
+TG_SESSION_STRING = os.environ.get("TG_SESSION_STRING", "").strip()
 
 BOT_VH = os.environ.get("BOT_VH", "@VoucherHub_bot").strip()
 OUTPUT = os.environ.get("OUTPUT_FILE", "Ali1377.01.05.json").strip()
+
+# Telegram channel poster. Token and channel ID are intentionally required;
+# public URLs/usernames have safe defaults and can be overridden in Render.
+SENDER_BOT_TOKEN = os.environ.get("SENDER_BOT_TOKEN", "").strip()
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "").strip()
+SUPPORT_USERNAME = os.environ.get("SUPPORT_USERNAME", "@Vochino_bh01").strip()
+MAIN_BOT_URL = os.environ.get(
+    "MAIN_BOT_URL", "https://t.me/Vochino_bh01_bot"
+).strip()
+SWAPWALLET_PRICES_URL = "https://swapwallet.app/api/v1/market/prices"
+POSTER_INTERVAL_SECONDS = 3600
+POSTER_JITTER_SECONDS = 60
+POSTER_INITIAL_DELAY_SECONDS = 60
+POSTER_HTTP_TIMEOUT = 10
+POSTER_RETRIES = 1  # one retry means at most two attempts per request
 
 PORT = int(os.environ.get("PORT", "10000"))
 PUBLIC_BASE_URL = (
@@ -1285,6 +1302,336 @@ def run_async_loops() -> None:
 
 
 # ============================================================
+# TELEGRAM PRICE POSTER
+# ============================================================
+_POSTER_SWAP_KEYS = (
+    "USDT/IRT",
+    "TRX/IRT",
+    "TON/IRT",
+    "BTC/IRT",
+    "ETH/IRT",
+    "FET/IRT",
+)
+_PERSIAN_WEEKDAYS = (
+    "دوشنبه", "سه‌شنبه", "چهارشنبه", "پنجشنبه", "جمعه", "شنبه", "یکشنبه"
+)
+_PERSIAN_MONTHS = (
+    "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+)
+_PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def _poster_persian_digits(value: Any) -> str:
+    return str(value).translate(_PERSIAN_DIGITS)
+
+
+def _poster_parse_price(value: Any) -> Optional[int]:
+    """Parse an actual positive price; invalid/missing values are never fabricated."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            number = float(value)
+        else:
+            normalized = digits_to_ascii(str(value)).strip()
+            normalized = normalized.replace(",", "").replace("٬", "").replace("،", "")
+            match = re.search(r"\d+(?:\.\d+)?", normalized)
+            if not match:
+                return None
+            number = float(match.group(0))
+        if not (number > 0 and number < 10**18):
+            return None
+        return int(round(number))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _poster_format_price(value: Any) -> str:
+    parsed = _poster_parse_price(value)
+    return f"{parsed:,}" if parsed is not None else "ناموجود"
+
+
+def _poster_cached_swap_prices() -> Dict[str, int]:
+    with state_lock:
+        meta = STATE.get("meta", {})
+        poster_meta = meta.get("poster", {}) if isinstance(meta, dict) else {}
+        cached = poster_meta.get("swapwallet_prices", {}) if isinstance(poster_meta, dict) else {}
+        if not isinstance(cached, dict):
+            return {}
+        clean: Dict[str, int] = {}
+        for key in _POSTER_SWAP_KEYS:
+            parsed = _poster_parse_price(cached.get(key))
+            if parsed is not None:
+                clean[key] = parsed
+        return clean
+
+
+def _poster_fetch_swap_prices() -> Dict[str, int]:
+    """Fetch SwapWallet prices with timeout=10s and one retry; keep a durable cache."""
+    last_error: Optional[str] = None
+
+    for attempt in range(POSTER_RETRIES + 1):
+        try:
+            response = requests.get(SWAPWALLET_PRICES_URL, timeout=POSTER_HTTP_TIMEOUT)
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict) or str(payload.get("status", "")).upper() != "OK":
+                raise ValueError("SwapWallet returned an unexpected status/payload")
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                raise ValueError("SwapWallet result is not an object")
+
+            fresh: Dict[str, int] = {}
+            for key in _POSTER_SWAP_KEYS:
+                parsed = _poster_parse_price(result.get(key))
+                if parsed is not None:
+                    fresh[key] = parsed
+            if not fresh:
+                raise ValueError("SwapWallet response contained no valid required prices")
+
+            with state_lock:
+                meta = STATE.get("meta")
+                if not isinstance(meta, dict):
+                    meta = {}
+                    STATE["meta"] = meta
+                poster_meta = meta.get("poster")
+                if not isinstance(poster_meta, dict):
+                    poster_meta = {}
+                    meta["poster"] = poster_meta
+                cached = poster_meta.get("swapwallet_prices")
+                if not isinstance(cached, dict):
+                    cached = {}
+                    poster_meta["swapwallet_prices"] = cached
+                # Merge partial responses with cached values so a missing API key
+                # does not erase its last known good price.
+                cached.update(fresh)
+                poster_meta["swapwallet_last_success"] = iso_now()
+                poster_meta["swapwallet_last_error"] = None
+                STATE["last_updated"] = iso_now()
+                _atomic_write_locked(STATE)
+                merged = {
+                    key: parsed
+                    for key in _POSTER_SWAP_KEYS
+                    if (parsed := _poster_parse_price(cached.get(key))) is not None
+                }
+
+            log("[POSTER] SwapWallet prices updated: {} key(s)".format(len(fresh)))
+            return merged
+        except Exception as exc:
+            last_error = str(exc)
+            log(
+                "[POSTER] SwapWallet attempt {}/{} failed: {}".format(
+                    attempt + 1, POSTER_RETRIES + 1, last_error
+                )
+            )
+            if attempt < POSTER_RETRIES:
+                time.sleep(1.0)
+
+    cached_prices = _poster_cached_swap_prices()
+    with state_lock:
+        meta = STATE.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+            STATE["meta"] = meta
+        poster_meta = meta.get("poster")
+        if not isinstance(poster_meta, dict):
+            poster_meta = {}
+            meta["poster"] = poster_meta
+        poster_meta["swapwallet_last_error"] = (last_error or "unknown error")[:500]
+        STATE["last_updated"] = iso_now()
+        _atomic_write_locked(STATE)
+
+    if cached_prices:
+        log("[POSTER] SwapWallet unavailable; using cached STATE prices.")
+    else:
+        log("[POSTER] SwapWallet unavailable and no cached prices exist.")
+    return cached_prices
+
+
+def _poster_tehran_date_time() -> Tuple[str, str]:
+    tehran = datetime.now(ZoneInfo("Asia/Tehran"))
+    jdate = jdatetime.datetime.fromgregorian(datetime=tehran)
+    # Explicit localized names/digits avoid locale-dependent English output from
+    # strftime while keeping jdatetime as the Jalali calendar conversion source.
+    weekday = _PERSIAN_WEEKDAYS[tehran.weekday()]
+    month = _PERSIAN_MONTHS[jdate.month - 1]
+    date_text = "{} {} {} {}".format(
+        weekday,
+        _poster_persian_digits(f"{jdate.day:02d}"),
+        month,
+        _poster_persian_digits(jdate.year),
+    )
+    time_text = _poster_persian_digits(tehran.strftime("%H:%M:%S"))
+    return date_text, time_text
+
+
+def _poster_spread_percent(buy_value: Any, sell_value: Any) -> Optional[int]:
+    buy = _poster_parse_price(buy_value)
+    sell = _poster_parse_price(sell_value)
+    if buy is None or sell is None or buy <= 0:
+        return None
+    # Required formula, constrained to the requested 0..100 display range.
+    raw_percent = ((sell - buy) / buy) * 100.0
+    return int(round(max(0.0, min(100.0, raw_percent))))
+
+
+def _poster_progress_bar(percent: Optional[int]) -> str:
+    if percent is None:
+        filled = 0
+    else:
+        # Ten percentage points per block gives the requested 83% -> 8/9 example.
+        filled = min(9, max(0, int(percent // 10)))
+    return "▰" * filled + "▱" * (9 - filled)
+
+
+def _poster_support_url() -> str:
+    support = SUPPORT_USERNAME.strip()
+    if support.startswith(("https://t.me/", "http://t.me/")):
+        return support
+    return "https://t.me/" + support.lstrip("@/")
+
+
+def _poster_build_message(
+    ali_prices: Dict[str, Any],
+    swap_prices: Dict[str, Any],
+) -> str:
+    date_text, time_text = _poster_tehran_date_time()
+
+    u_buy = ali_prices.get("u_buy")
+    u_sell = ali_prices.get("u_sell")
+    premium_buy = ali_prices.get("premium_buy")
+    premium_sell = ali_prices.get("premium_sell")
+
+    u_percent = _poster_spread_percent(u_buy, u_sell)
+    premium_percent = _poster_spread_percent(premium_buy, premium_sell)
+    u_percent_text = "{}%".format(u_percent) if u_percent is not None else "ناموجود"
+    premium_percent_text = "{}%".format(premium_percent) if premium_percent is not None else "ناموجود"
+
+    usdt_irt = _poster_parse_price(swap_prices.get("USDT/IRT"))
+    utopia_usd = None
+    try:
+        with state_lock:
+            utopia_usd = parse_float(STATE.get("ali1377", {}).get("utopia_usd"))
+    except Exception:
+        utopia_usd = None
+    utopia_toman = (
+        int(round(utopia_usd * usdt_irt))
+        if utopia_usd is not None and utopia_usd > 0 and usdt_irt is not None
+        else None
+    )
+
+    lines = [
+        "╭✪ ➫ 𝑽𝒐𝒄𝒉𝒊𝒏𝒐 ➫ ✪╮",
+        "        🜲 صرافی ووچینو⁰¹",
+        "╰┉💲 𓆩𓆩🏦𓆪𓆪 💲┉╯",
+        "",
+        "📅 {} | ⏰ {}".format(date_text, time_text),
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "       🎫 𝒗𝒐𝒖𝒄𝒉𝒆𝒓 🎫",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "🔷 𝑩𝒖𝒚    𝑼-𝑽𝒐𝒖𝒄𝒉𝒆𝒓",
+        "     ➫ {} تومان".format(_poster_format_price(u_buy)),
+        "🔶 𝑺𝒆𝒍𝒍   𝑼-𝑽𝒐𝒖𝒄𝒉𝒆𝒓",
+        "     ➫ {} تومان".format(_poster_format_price(u_sell)),
+        "     ✪ {} {}".format(_poster_progress_bar(u_percent), u_percent_text),
+        "",
+        "🔷 𝑩𝒖𝒚    𝑷𝒓𝒆𝒎𝒊𝒖𝒎",
+        "     ➫ {} تومان".format(_poster_format_price(premium_buy)),
+        "🔶 𝑺𝒆𝒍𝒍   𝑷𝒓𝒆𝒎𝒊𝒖𝒎",
+        "     ➫ {} تومان".format(_poster_format_price(premium_sell)),
+        "     ✪ {} {}".format(_poster_progress_bar(premium_percent), premium_percent_text),
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "        💎 𝒄𝒓𝒚𝒑𝒕𝒐 💎",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "💵 𝒕𝒆𝒕𝒉𝒆𝒓       ➫ {} تومان".format(_poster_format_price(usdt_irt)),
+        "✨ 𝒖𝒕𝒐𝒑𝒊𝒂       ➫ {} تومان".format(_poster_format_price(utopia_toman)),
+        "",
+        "🪙 𝒕𝒓𝒐𝒏         ➫ {} تومان".format(_poster_format_price(swap_prices.get("TRX/IRT"))),
+        "💎 𝒕𝒐𝒏          ➫ {} تومان".format(_poster_format_price(swap_prices.get("TON/IRT"))),
+        "",
+        "🟠 𝒃𝒊𝒕𝒄𝒐𝒊𝒏      ➫ {} تومان".format(_poster_format_price(swap_prices.get("BTC/IRT"))),
+        "🔷 𝒆𝒕𝒉𝒆𝒓𝒆𝒖𝒎     ➫ {} تومان".format(_poster_format_price(swap_prices.get("ETH/IRT"))),
+        "",
+        "🤖 𝒂𝒊 (𝑭𝑬𝑻)      ➫ {} تومان".format(_poster_format_price(swap_prices.get("FET/IRT"))),
+        "",
+        "━━━━━━━━━━━━━━━━━━",
+        "   ⏰ بروزرسانی: هر ۱ ساعت",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    return "\n".join(lines)
+
+
+def _poster_send_message(message_text: str) -> bool:
+    """Send through Bot API with a 10s timeout and one retry."""
+    url = "https://api.telegram.org/bot{}/sendMessage".format(SENDER_BOT_TOKEN)
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": message_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+        "reply_markup": {
+            "inline_keyboard": [[
+                {"text": "✪ ورود", "url": MAIN_BOT_URL},
+                {"text": "✆ پشتیبانی", "url": _poster_support_url()},
+            ]]
+        },
+    }
+
+    for attempt in range(POSTER_RETRIES + 1):
+        try:
+            response = requests.post(url, json=payload, timeout=POSTER_HTTP_TIMEOUT)
+            response.raise_for_status()
+            result = response.json()
+            if isinstance(result, dict) and result.get("ok") is True:
+                log("[POSTER] Sent OK")
+                return True
+            description = result.get("description", "Telegram API returned ok=false") if isinstance(result, dict) else "Invalid Telegram API response"
+            raise ValueError(str(description)[:300])
+        except Exception as exc:
+            log(
+                "[POSTER] Telegram send attempt {}/{} failed: {}".format(
+                    attempt + 1, POSTER_RETRIES + 1, str(exc)[:400]
+                )
+            )
+            if attempt < POSTER_RETRIES:
+                time.sleep(1.0)
+    return False
+
+
+def poster_loop() -> None:
+    """Low-frequency poster worker; independent of the pricing scheduler's async loop."""
+    if not SENDER_BOT_TOKEN or not CHANNEL_ID:
+        log("[POSTER] Disabled — SENDER_BOT_TOKEN or CHANNEL_ID is missing.")
+        return
+
+    log("[POSTER] Thread started; first send in 60 seconds.")
+    if SHUTDOWN.wait(POSTER_INITIAL_DELAY_SECONDS):
+        return
+
+    while not SHUTDOWN.is_set():
+        try:
+            swap_prices = _poster_fetch_swap_prices()
+            with state_lock:
+                ali_prices = dict(STATE.get("ali1377", {}))
+            message_text = _poster_build_message(ali_prices, swap_prices)
+            _poster_send_message(message_text)
+        except Exception as exc:
+            # Poster errors must not kill this thread or the existing service loops.
+            log("[POSTER] Unexpected loop error: {}".format(str(exc)[:500]))
+
+        delay = POSTER_INTERVAL_SECONDS + random.uniform(
+            -POSTER_JITTER_SECONDS, POSTER_JITTER_SECONDS
+        )
+        if SHUTDOWN.wait(delay):
+            break
+
+
+# ============================================================
 # BACKGROUND THREAD STARTUP
 # ============================================================
 # IMPORTANT FOR GUNICORN:
@@ -1312,6 +1659,11 @@ def start_background_threads() -> None:
         target=run_async_loops,
         daemon=True,
         name="async-core",
+    ).start()
+    threading.Thread(
+        target=poster_loop,
+        daemon=True,
+        name="poster_loop",
     ).start()
 
 
