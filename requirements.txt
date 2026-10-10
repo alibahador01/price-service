@@ -1,4 +1,0 @@
-telethon
-requests
-flask
-gunicorn
