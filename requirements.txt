@@ -3,3 +3,7 @@ requests
 flask
 gunicorn
 jdatetime
+google-genai
+groq
+sports-skills
+betbetter
