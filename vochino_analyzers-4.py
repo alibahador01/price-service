@@ -25,7 +25,7 @@ try:
 except ImportError:  # pragma: no cover - Render runs on Linux
     fcntl = None
 
-TZ = ZoneInfo("Asia/Tehran")
+TZ = ZoneInfo("Europe/Istanbul")
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports"
 ESPN_TIMEOUT = (3.05, 8.0)
 AI_TIMEOUT_SECONDS = 15
@@ -1175,7 +1175,7 @@ def _daily_brief(provider: SportsDataProvider, now: dt.datetime, snapshot: Optio
     live = [event for event in today_events if event.get("state") in ("in", "live")]
     completed = [event for event in today_events if event.get("state") in ("post", "final")]
     lines = ["╭〰 ➫ 𝑽𝒐𝒄𝒉𝒊𝒏𝒐 ➫ 〰╮", "📰 اخبار ورزشی روز", "╰〰💲 𓆩𓆩📊𓆪𓆪 💲〰╯",
-             f"📅 {_fa_digits(_jalali_date(now))} | ⏰ {_fa_digits(now.strftime('%H:%M'))} تهران", ""]
+             f"📅 {_fa_digits(_jalali_date(now))} | ⏰ {_fa_digits(now.strftime('%H:%M'))} استانبول", ""]
     if successes == 0:
         lines.append("⚠️ برنامه مسابقات از ESPN دریافت نشد؛ بنابراین درباره نبود مسابقه نتیجه‌گیری نمی‌شود.")
     else:
@@ -1218,7 +1218,7 @@ def _daily_brief(provider: SportsDataProvider, now: dt.datetime, snapshot: Optio
         sources_used.append("sports-skills (fallback)")
     if not sources_used:
         sources_used.append("منابع بررسی‌شده؛ دریافت موفق تأیید نشد")
-    lines.extend(["", "📚 منابع برنامه: " + "، ".join(sources_used) + " | ساعت‌ها به وقت Asia/Tehran", "⚠️ این پیام برنامه و خبر است، نه پیشنهاد شرط‌بندی."])
+    lines.extend(["", "📚 منابع برنامه: " + "، ".join(sources_used) + " | ساعت‌ها به وقت Europe/Istanbul", "⚠️ این پیام برنامه و خبر است، نه پیشنهاد شرط‌بندی."])
     return "\n".join(lines)[:3900]
 
 
@@ -1242,7 +1242,7 @@ def _crypto_report(snapshot: Dict[str, Any], now: dt.datetime) -> str:
         "ETH/IRT": "اتریوم/تومان", "FET/IRT": "FET/تومان", "PAXG/IRT": "PAXG/تومان", "XAUT/IRT": "XAUT/تومان",
     }
     lines = ["╭〰 ➫ 𝑽𝒐𝒄𝒉𝒊𝒏𝒐 ➫ 〰╮", "📊 تحلیل بازار کریپتو", "╰〰💲 𓆩𓆩📊𓆪𓆪 💲〰╯",
-             f"📅 {_fa_digits(_jalali_date(now))} | ⏰ {_fa_digits(now.strftime('%H:%M'))} تهران", "", "💰 قیمت‌های موجود در snapshot سرویس"]
+             f"📅 {_fa_digits(_jalali_date(now))} | ⏰ {_fa_digits(now.strftime('%H:%M'))} استانبول", "", "💰 قیمت‌های موجود در snapshot سرویس"]
     count = 0
     for key, label in current_labels.items():
         value = prices.get(key)
@@ -1350,7 +1350,7 @@ def _single_pick_message(event: Dict[str, Any], analysis: Dict[str, Any], now: d
         "╭〰 ➫ 𝑽𝒐𝒄𝒉𝒊𝒏𝒐 ➫ 〰╮", "تحلیل ورزشی امروز", "╰〰💲 𓆩𓆩📊𓆪𓆪 💲〰╯",
         f"📅 {_fa_digits(_jalali_date(now))} | ⏰ {_fa_digits(now.strftime('%H:%M'))}",
         f"🏟 {_safe_text(event.get('home') or event.get('name'), 100)} 🆚 {_safe_text(event.get('away'), 100)}",
-        f"🏆 {_safe_text(event.get('league'), 100)} | شروع {_fa_digits(start)} تهران",
+        f"🏆 {_safe_text(event.get('league'), 100)} | شروع {_fa_digits(start)} استانبول",
         "🎯 بازار: برنده مسابقه / h2h",
         f"📊 برآورد مدل: {_fa_digits(format(analysis['probability_pct'], '.1f'))}٪ (برآورد مدل، نه احتمال تضمین‌شده)",
         f"🧾 انتخاب: {_safe_text(analysis['selection'], 100)}",
@@ -1447,7 +1447,7 @@ def _maybe_daily_mix(ledger: AnalyzerLedger, send: Callable[[str], bool], logger
 
 
 def _crypto_due(now: dt.datetime) -> Optional[str]:
-    # One fixed run in each requested window, local to Asia/Tehran.
+    # One fixed run in each requested window, local to Europe/Istanbul.
     if now.hour == 12 and now.minute >= 30:
         return "midday"
     if now.hour == 0 and now.minute >= 30:
