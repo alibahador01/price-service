@@ -1444,7 +1444,7 @@ def start_background_threads() -> None:
             state_file=os.environ.get("ANALYZER_STATE_FILE", OUTPUT + ".analyzers.json").strip(),
         )
     except Exception as exc:
-        log("[ANALYZER] Startup failed safely: {}: {}".format(type(exc).__name__, str(exc)[:300]))
+        log("[ANALYZER] Startup failed safely: {}".format(type(exc).__name__))
 
 
 @app.before_request
