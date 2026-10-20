@@ -2488,7 +2488,7 @@ def start_analyzer_threads(*, state_snapshot: Callable[[], Dict[str, Any]], send
             try:
                 if fcntl:
                     fcntl.flock(lease.fileno(), fcntl.LOCK_UN)
-                lease.close()
+                lease.()
             except Exception:
                 pass
     thread = threading.Thread(target=target, daemon=True, name="vochino-analyzers")
