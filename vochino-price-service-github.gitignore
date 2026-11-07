@@ -1,0 +1,10 @@
+*.session
+*.session-journal
+*.session-wal
+*.session-shm
+__pycache__/
+*.py[cod]
+
+# State اجراییِ قابلیت‌های جدید (تولید در Runtime؛ نباید commit شود)
+central_scheduler_state.json
+whale_state.json
