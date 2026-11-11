@@ -1555,7 +1555,7 @@ def _poster_build_large_list_message(
     lines = [
         "╭〰 ➫ 𝑽𝒐𝒄𝒉𝒊𝒏𝒐-𝑯𝒖𝒃 ➫ 〰╮",
         " ⫹⫺ صرافی ووچینو-هاب⁰¹",
-        "╰〰💲 𓆩𓆩🏦𓆪𓆪 💲〰╯",
+        "╰〰〰️💲 𓆩𓆩🏦𓆪𓆪💲〰️〰╯",
         "",
         "📅 {} | ⏰ {}".format(date_text, time_text),
         "",
@@ -1764,7 +1764,13 @@ def _central_fetch_fear_greed() -> Dict[str, Any]:
 
 def _central_fetch_btc_dominance() -> Optional[float]:
     try:
-        response = requests.get("https://api.coingecko.com/api/v3/global", timeout=POSTER_HTTP_TIMEOUT)
+        key = os.environ.get("COINGECKO_API_KEY", "").strip()
+        headers = {"x-cg-demo-api-key": key} if key else None
+        response = requests.get(
+            "https://api.coingecko.com/api/v3/global",
+            headers=headers,
+            timeout=POSTER_HTTP_TIMEOUT
+        )
         response.raise_for_status()
         data = response.json().get("data") or {}
         dominance = (data.get("market_cap_percentage") or {}).get("btc")
@@ -1777,9 +1783,12 @@ def _central_fetch_btc_dominance() -> Optional[float]:
 def _central_fetch_24h_changes() -> Dict[str, Optional[float]]:
     ids = ",".join(_CRYPTO_24H_IDS.values())
     try:
+        key = os.environ.get("COINGECKO_API_KEY", "").strip()
+        headers = {"x-cg-demo-api-key": key} if key else None
         response = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": ids, "vs_currencies": "usd", "include_24hr_change": "true"},
+            headers=headers,
             timeout=POSTER_HTTP_TIMEOUT,
         )
         response.raise_for_status()
