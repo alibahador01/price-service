@@ -3,12 +3,9 @@ gemini_client.py
 کلاینت Gemini — تحلیل‌گر اصلی (بخش ۴.۱، ۴.۴، ۴.۵ سند). از SDK رسمی
 `google-genai` استفاده می‌کند.
 
-⚠️ هشدار صادقانه: این فایل در محیطی بدون دسترسی اینترنت نوشته شده است؛
-امضای دقیق متدهای SDK (به‌خصوص نام پارامتر Thinking Level برای
-gemini-3.8-flash) تست زنده نشده. پیش از Deploy، طبق بخش ۱۶ سند، حتماً با
-مستندات فعلی https://ai.google.dev/gemini-api/docs تطبیق داده شود. اگر نام
-پارامتر عوض شده باشد، این تابع Exception می‌دهد و crypto_intelligence طبق
-Guard لایه ۵ آن چرخه را skip می‌کند؛ سرویس قیمت متاثر نمی‌شود.
+⚠️ اصلاح‌شده: پارامتر `thinking_level` در نسخه فعلی SDK وجود ندارد و
+باعث خطای Validation می‌شد. به جای آن از `thinking_budget` (عدد) استفاده
+شده است. بودجه ۲۰۴۸ تعادل خوبی بین عمق تحلیل و مصرف توکن ایجاد می‌کند.
 """
 from __future__ import annotations
 
@@ -17,7 +14,7 @@ import os
 from typing import Any, Dict, Optional
 
 GEMINI_MODEL_DEFAULT = "gemini-3.8-flash"
-GEMINI_THINKING_LEVEL_DEFAULT = "high"  # طبق بخش ۴.۱: minimal ممنوع است
+GEMINI_THINKING_LEVEL_DEFAULT = "high"  # فقط برای سازگاری با فراخوانی‌های قبلی؛ در کد استفاده نمی‌شود
 
 
 class GeminiUnavailable(Exception):
@@ -30,7 +27,7 @@ def call_gemini_structured(
     *,
     api_key: str,
     model: Optional[str] = None,
-    thinking_level: str = GEMINI_THINKING_LEVEL_DEFAULT,
+    thinking_level: str = GEMINI_THINKING_LEVEL_DEFAULT,  # نگه داشته شد تا render_app.py نشکند
     timeout: float = 30.0,
 ) -> Dict[str, Any]:
     """یک خروجی JSON ساختاریافته برمی‌گرداند یا GeminiUnavailable raise
@@ -47,13 +44,14 @@ def call_gemini_structured(
 
     try:
         client = genai.Client(api_key=api_key)
-        # TODO(verify-before-deploy): نام و ساختار دقیق ThinkingConfig را با
-        # نسخه فعلی SDK تطبیق بده؛ ممکن است thinking_level یا نام دیگری باشد.
+        
+        # 🟢 اصلاح اصلی اینجاست: استفاده از thinking_budget به جای thinking_level
         config = types.GenerateContentConfig(
             system_instruction=system_prompt,
             response_mime_type="application/json",
-            thinking_config=types.ThinkingConfig(thinking_level=thinking_level),
+            thinking_config=types.ThinkingConfig(thinking_budget=2048),
         )
+        
         response = client.models.generate_content(
             model=model,
             contents=json.dumps(user_payload, ensure_ascii=False),
