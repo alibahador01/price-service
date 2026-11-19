@@ -1,16 +1,12 @@
 """
 central_scheduler.py
-طبق درخواست صریح کاربر برای بهینه‌سازی منابع Render: **یک Scheduler مرکزی
-و سبک** به‌جای چند Thread/Worker جداگانه برای هر قابلیت جدید. این فایل
-جایگزین poster_loop قدیمی می‌شود و مسئول هر هفت نوع پیام روزانه
-(small_list, big_list, crypto_intel, market_pulse, whale_alert, arbitrage,
-goodnight) + دیسپچ فوتبال (که به‌خاطر دقت ۹۰دقیقه‌ای نیاز به tick کوتاه
-دارد) است — همه در یک حلقه واحد با یک sleep، بدون Thread اضافه.
+یک زمان‌بند مرکزی سبک برای انتشار روزانه فقط دو فهرست قیمت:
+- small_list: ووچرها + USDT + Utopia، یک بار بین 17:00 تا 20:00 تهران
+- big_list: فهرست کامل دارایی‌ها، یک بار بین 11:30 تا 14:00 تهران
 
-هیچ تابعی در این فایل مستقیماً شبکه صدا نمی‌زند؛ همه چیز از طریق context
-(دیکشنری از callableها، توسط render_app.py ساخته می‌شود) تزریق می‌شود تا
-هم بدون اینترنت تست شود و هم به سیستم قیمت‌دهی ووچر/دلار/یوتوپیا دست
-نخورد (آن سیستم کاملاً جدا و دست‌نخورده می‌ماند).
+سایر dispatchها، ارسال فوتبال، و قابلیت‌های جانبی در سورس باقی مانده‌اند
+اما در پیکربندی فعلی فراخوانی نمی‌شوند. دریافت قیمت وچر/دلار/یوتوپیا در
+render_app.py چرخه مستقل خود را دارد و از این زمان‌بندی انتشار جداست.
 """
 from __future__ import annotations
 
@@ -51,17 +47,19 @@ def _send_with_promo(context: Dict[str, Any], base_text: str, promo_state: Dict[
 
 
 def dispatch_small_list(context, promo_state) -> bool:
+    """ارسال خودِ فهرست ووچر؛ بدون افزودن پست/فوتر تبلیغاتی."""
     text = context["build_small_list_message"]()
     if not text:
         return False
-    return _send_with_promo(context, text, promo_state)
+    return context["send_text_message"](text)
 
 
 def dispatch_big_list(context, promo_state) -> bool:
+    """ارسال خودِ فهرست کامل دارایی‌ها؛ بدون افزودن پست/فوتر تبلیغاتی."""
     text = context["build_large_list_message"]()
     if not text:
         return False
-    return _send_with_promo(context, text, promo_state)
+    return context["send_text_message"](text)
 
 
 def dispatch_goodnight(context) -> bool:
@@ -177,22 +175,26 @@ _NON_FOOTBALL_DISPATCH: Dict[str, Callable] = {
 
 
 def run_tick(context: Dict[str, Any], state: Dict[str, Any], now: datetime) -> Dict[str, Any]:
-    """یک tick کامل: پیام‌های روزمره سررسیدشده + رفرش/ارسال فوتبال. state
-    شامل daily_schedule, promo, football_provider, football_fixtures,
-    football_last_refresh است. خروجی: گزارش کوتاه برای لاگ/تست."""
-    tz = context["tz"]
-    local_date = now.astimezone(tz).date()
+    """یک tick از زمان‌بند: فقط دو فهرست مجاز منتشر می‌شوند؛ پردازش فوتبال
+    صرفاً با opt-in صریح فعال می‌شود. خروجی برای لاگ و تست است."""
+    tz = context["tz"]  # منطقه زمانی قابلیت فوتبالِ غیرفعال‌شده
+    schedule_tz = context.get("schedule_tz", tz)
+    local_date = now.astimezone(schedule_tz).date()
     report: Dict[str, Any] = {"sent": [], "failed": [], "football_sent": [], "football_actions": []}
 
-    # ۱) زمان‌بندی روزانه هفت نوع پیام (تولید/بازیابی پایدار همان روز)
+    # ۱) زمان‌بندی روزانه دو فهرست مجاز؛ همیشه بر اساس ساعت تهران
     schedule = scheduler_mod.get_or_create_today_schedule(
-        state.get("daily_schedule"), local_date, tz_name=context.get("tz_name", "Asia/Tehran"),
+        state.get("daily_schedule"), local_date,
+        tz_name=context.get("schedule_tz_name", scheduler_mod.DEFAULT_TIMEZONE),
     )
     state["daily_schedule"] = schedule
 
     promo_state = state.setdefault("promo", dict(promo_messages.DEFAULT_PROMO_STATE))
 
     for job, idx in scheduler_mod.due_jobs(schedule, now):
+        # allowlist ثانویه: حتی State قدیمی/دستی هم نمی‌تواند job خاموشی را ارسال کند.
+        if job not in scheduler_mod.JOB_COUNTS:
+            continue
         handler = _NON_FOOTBALL_DISPATCH.get(job)
         if handler is None:
             continue
@@ -209,52 +211,56 @@ def run_tick(context: Dict[str, Any], state: Dict[str, Any], now: datetime) -> D
             # شکست یک نوع پیام بقیه پیام‌های سررسیدشده همین tick را متوقف نمی‌کند.
             report["failed"].append(job)
 
-    # ۲) رفرش فوتبال (فقط هر N دقیقه، نه هر tick)
-    poll_minutes = context.get("football_poll_interval_minutes", 15)
-    last_refresh = state.get("football_last_refresh")
-    needs_refresh = last_refresh is None or (now - datetime.fromisoformat(last_refresh)).total_seconds() >= poll_minutes * 60
-    if needs_refresh:
-        lookahead_days = context.get("football_lookahead_days", 7)
-        date_from = local_date.isoformat()
-        date_to_str = (local_date + timedelta(days=lookahead_days)).isoformat()
-        provider_state = state.get("football_provider") or football_client.initial_provider_state()
-        fixtures_state = state.get("football_fixtures") or []
-        new_fixtures, new_provider_state, actions = football_dispatch.refresh_fixtures_cycle(
-            provider_state=provider_state, fixtures_state=fixtures_state,
-            bzzoiro_api_key=context.get("bzzoiro_api_key", ""),
-            football_data_api_key=context.get("football_data_api_key", ""),
-            fetch_bzzoiro_fn=context["fetch_bzzoiro_events"],
-            fetch_football_data_fn=context["fetch_football_data_matches"],
-            local_date=local_date, tz=tz, now=now,
-            date_from=date_from, date_to=date_to_str,
-        )
-        state["football_fixtures"] = new_fixtures
-        state["football_provider"] = new_provider_state
-        state["football_last_refresh"] = now.isoformat()
-        report["football_actions"] = _apply_football_actions(context, actions)
+    # ۲ و ۳) قابلیت فوتبال کامل و دست‌نخورده باقی مانده است، اما در انتشار
+    # فعلی خاموش است. در نتیجه نه پست فوتبالی می‌رود و نه پیام موجودی ویرایش/حذف می‌شود.
+    if context.get("football_channel_posts_enabled", False):
+        # ۲) رفرش فوتبال (فقط هر N دقیقه، نه هر tick)
+        football_local_date = now.astimezone(tz).date()
+        poll_minutes = context.get("football_poll_interval_minutes", 15)
+        last_refresh = state.get("football_last_refresh")
+        needs_refresh = last_refresh is None or (now - datetime.fromisoformat(last_refresh)).total_seconds() >= poll_minutes * 60
+        if needs_refresh:
+            lookahead_days = context.get("football_lookahead_days", 7)
+            date_from = football_local_date.isoformat()
+            date_to_str = (football_local_date + timedelta(days=lookahead_days)).isoformat()
+            provider_state = state.get("football_provider") or football_client.initial_provider_state()
+            fixtures_state = state.get("football_fixtures") or []
+            new_fixtures, new_provider_state, actions = football_dispatch.refresh_fixtures_cycle(
+                provider_state=provider_state, fixtures_state=fixtures_state,
+                bzzoiro_api_key=context.get("bzzoiro_api_key", ""),
+                football_data_api_key=context.get("football_data_api_key", ""),
+                fetch_bzzoiro_fn=context["fetch_bzzoiro_events"],
+                fetch_football_data_fn=context["fetch_football_data_matches"],
+                local_date=football_local_date, tz=tz, now=now,
+                date_from=date_from, date_to=date_to_str,
+            )
+            state["football_fixtures"] = new_fixtures
+            state["football_provider"] = new_provider_state
+            state["football_last_refresh"] = now.isoformat()
+            report["football_actions"] = _apply_football_actions(context, actions)
 
-    # ۳) ارسال مسابقات سررسیدشده (دقیقاً ۹۰ دقیقه قبل از kickoff)
-    fixtures_state = state.get("football_fixtures") or []
-    license_confirmed = context.get("football_image_license_confirmed", False)
-    for entry in football_fixtures.due_fixture_sends(fixtures_state, now):
-        payload = football_dispatch.build_match_send_payload(
-            entry, license_confirmed=license_confirmed, tz=tz,
-            date_fa_fn=context.get("format_local_date_fn"),
-            time_fa_fn=context.get("format_local_time_fn"),
-        )
-        promo = promo_messages.peek_next_promo(promo_state)
-        caption = promo_messages.append_promo_footer(payload["caption"], promo["text"])
-        msg_id = context["send_football_match"](payload["image"], caption)
-        if msg_id is not None:
-            new_state = promo_messages.commit_promo_index(promo_state, promo["index"])
-            promo_state.clear()
-            promo_state.update(new_state)
-            for i, e in enumerate(fixtures_state):
-                if e.get("identity_key") == entry.get("identity_key"):
-                    fixtures_state[i] = football_fixtures.mark_sent(entry, now, chat_message_id=msg_id)
-                    break
-            report["football_sent"].append(entry.get("identity_key"))
-    state["football_fixtures"] = fixtures_state
+        # ۳) ارسال مسابقات سررسیدشده (دقیقاً ۹۰ دقیقه قبل از kickoff)
+        fixtures_state = state.get("football_fixtures") or []
+        license_confirmed = context.get("football_image_license_confirmed", False)
+        for entry in football_fixtures.due_fixture_sends(fixtures_state, now):
+            payload = football_dispatch.build_match_send_payload(
+                entry, license_confirmed=license_confirmed, tz=tz,
+                date_fa_fn=context.get("format_local_date_fn"),
+                time_fa_fn=context.get("format_local_time_fn"),
+            )
+            promo = promo_messages.peek_next_promo(promo_state)
+            caption = promo_messages.append_promo_footer(payload["caption"], promo["text"])
+            msg_id = context["send_football_match"](payload["image"], caption)
+            if msg_id is not None:
+                new_state = promo_messages.commit_promo_index(promo_state, promo["index"])
+                promo_state.clear()
+                promo_state.update(new_state)
+                for i, e in enumerate(fixtures_state):
+                    if e.get("identity_key") == entry.get("identity_key"):
+                        fixtures_state[i] = football_fixtures.mark_sent(entry, now, chat_message_id=msg_id)
+                        break
+                report["football_sent"].append(entry.get("identity_key"))
+        state["football_fixtures"] = fixtures_state
 
     return report
 
